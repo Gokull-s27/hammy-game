@@ -15,7 +15,7 @@ const CELL = 0.8;            // size of one grid cell
 const HALF = CELL / 2;
 const TUBE_R = 0.3;          // tube radius
 const CAGE_DEPTH = 1.6;      // how deep cages are (front to back)
-const FLOOR_Y = 0.1;         // hamster feet height above a cage's bottom
+const TRAY_Y = 0.08;         // top of a cage's floor tray (sand starts here)
 const TUBE_FLOOR = HALF - 0.27;  // hamster feet height inside a tube cell
 const ITEM_Z = -0.35;        // items sit in the back half of a cage
 const HAM_Z = 0.2;           // hamsters walk in the front half of a cage
@@ -33,6 +33,12 @@ const PIECES = {
   corner: { kind: 'tube', open: [1, 2],       label: 'Corner', icon: '┓', code: 'c' },
   tee:    { kind: 'tube', open: [1, 2, 3],    label: 'T tube', icon: '┳', code: 'y' },
   cross:  { kind: 'tube', open: [0, 1, 2, 3], label: 'Cross',  icon: '╋', code: 'x' }
+};
+
+// Platforms (shelves) and ramps that go inside cages
+const FIXTURES = {
+  platform: { label: 'Platform', icon: '🟩', code: 'f' },
+  ramp:     { label: 'Ramp',     icon: '📐', code: 'a' }
 };
 
 // Things that go inside cages (one per floor cell)
@@ -57,8 +63,8 @@ const NAMES = ['Hammy', 'Peanut', 'Mochi', 'Biscuit', 'Nugget', 'Pip', 'Cocoa', 
   'Waffles', 'Pumpkin', 'Sushi', 'Muffin', 'Pebble', 'Honey', 'Oreo', 'Cookie', 'Bun', 'Fudge', 'Maple'];
 
 // Starting layout: small cage – tubes – big cage – tubes going up – small cage on top
-const DEFAULT_LAYOUT = 's0.0.0.0_i3.0.0.0_i4.0.0.0_l5.0.0.1_c10.0.2.1_i10.1.1.1_c10.2.0.1_' +
-  'i11.2.0.1_s12.2.0.2_w0.0_b1.0_o2.0_h7.0_o9.0_b13.2';
+const DEFAULT_LAYOUT = 's0.0.0.0.3_i3.0.0.0_i4.0.0.0_l5.0.0.1.2_c10.0.2.1_i10.1.1.1_c10.2.0.1_' +
+  'i11.2.0.1_s12.2.0.2.5_f9.1_a8.1.0_w0.0_b1.0_o2.0_h7.0_o5.0_b13.2_w9.1';
 const DEFAULT_HAMSTERS = '0000000';
 
 // =====================================================================
@@ -154,25 +160,50 @@ function makeTubeMesh(type, colorIdx, rot) {
   return g;
 }
 
-// Sandy bedding with little hills toward the back
-function makeBedding(W, D, seed) {
-  const geo = new THREE.PlaneGeometry(W - 0.08, D - 0.08, Math.max(8, Math.round(W * 8)), 12);
-  geo.rotateX(-Math.PI / 2);
+// ---------- SAND (bedding) ----------
+// Each cage has a sand level from 0 (none) to 1 (deep). The surface has gentle hills and
+// rises toward the back. bedHeight() is used both to draw the sand AND to place things on it.
+function bedHeight(piece, lx, z) {
+  const maxH = PIECES[piece.type].h * CELL * 0.8;
+  const level = piece.bed * maxH;
+  if (level < 0.005) return 0;
+  const s = piece.seed;
+  const hills = 0.55 * Math.sin(lx * 1.7 + s) + 0.3 * Math.sin(lx * 3.9 + s * 2.3);
+  const back = 0.5 - z / CAGE_DEPTH;                  // 0 at the front … 1 at the back
+  const h = level * (0.85 + 0.25 * hills) + level * 0.35 * back;
+  return THREE.MathUtils.clamp(h, 0.01, PIECES[piece.type].h * CELL - 0.15);
+}
+
+// Height of the sand surface in world space at a world x (and depth z) inside a cage
+function sandY(piece, worldX, z) {
+  const lx = worldX - (piece.gx * CELL - HALF);
+  return piece.gy * CELL + TRAY_Y + bedHeight(piece, lx, z);
+}
+
+function makeSandMesh(piece) {
+  const { w } = PIECES[piece.type];
+  const W = w * CELL - 0.06, D = CAGE_DEPTH - 0.06;
+  const geo = new THREE.BoxGeometry(W, 1, D, Math.round(W * 14), 1, 10);
   const p = geo.attributes.position;
   for (let i = 0; i < p.count; i++) {
     const x = p.getX(i), z = p.getZ(i);
-    const back = Math.max(0, -z / (D / 2));                     // 0 at front … 1 at back
-    const hills = 0.5 + 0.5 * Math.sin(x * 2.3 + seed) * Math.cos(x * 1.1 + seed * 2);
-    p.setY(i, 0.02 + back * back * 0.35 * (0.5 + hills) + Math.random() * 0.015);
+    if (p.getY(i) > 0) {
+      const grain = (Math.sin(x * 37.1 + z * 13.7) + Math.sin(x * 91.3 - z * 47.9)) * 0.006;
+      p.setY(i, bedHeight(piece, x + W / 2 + 0.03, z) + grain);   // top follows the hills
+    } else {
+      p.setY(i, 0);                                                // bottom stays flat
+    }
   }
   geo.computeVertexNormals();
   const mesh = new THREE.Mesh(geo, beddingMat);
+  mesh.position.set(W / 2 + 0.03, TRAY_Y, 0);
   mesh.receiveShadow = true;
+  mesh.castShadow = true;
   return mesh;
 }
 
 // Cage: open-front box. Origin = bottom-left corner of its cells (z centred).
-function makeCageMesh(type, colorIdx, seed = 1) {
+function makeCageMesh(type, colorIdx) {
   const { w, h } = PIECES[type];
   const W = w * CELL, H = h * CELL, D = CAGE_DEPTH, t = 0.06;
   const fm = frameMat(CAGE_COLORS[colorIdx]);
@@ -192,12 +223,39 @@ function makeCageMesh(type, colorIdx, seed = 1) {
   for (const x of [0, W]) for (const z of [-D / 2, D / 2]) box(t, H, t, x, H / 2, z);  // corner posts
   for (const z of [-D / 2, D / 2]) box(W + t, t, t, W / 2, H, z);                       // top bars
   for (const x of [0, W]) box(t, t, D, x, H, 0);
-  const bed = makeBedding(W, D, seed);
-  bed.position.set(W / 2, 0.08, 0);
-  g.add(bed);
   addRing(g, 3, HALF, HALF);                 // tube port, left wall
   addRing(g, 1, W - HALF, HALF);             // tube port, right wall
   return g;
+}
+
+// ---------- SAND HANDLE ----------
+// A round ⇕ button on the front of each cage. Drag it up/down in Build mode.
+const handleTexture = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = 'rgba(120,120,120,0.85)';
+  g.beginPath(); g.arc(64, 64, 58, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = 'rgba(255,255,255,0.9)'; g.lineWidth = 6; g.stroke();
+  g.fillStyle = 'white';
+  g.font = 'bold 72px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText('⇕', 64, 68);
+  return new THREE.CanvasTexture(c);
+})();
+
+function makeSandHandle(piece) {
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: handleTexture, depthTest: false }));
+  sprite.scale.set(0.42, 0.42, 1);
+  sprite.renderOrder = 10;
+  sprite.visible = mode === 'build';
+  sprite.userData.sandHandle = piece;
+  return sprite;
+}
+
+function placeSandHandle(piece) {
+  const W = PIECES[piece.type].w * CELL;
+  const top = TRAY_Y + bedHeight(piece, W / 2, CAGE_DEPTH / 2);
+  piece.handle.position.set(W / 2, Math.max(top, 0.22), CAGE_DEPTH / 2 + 0.05);
 }
 
 // =====================================================================
@@ -269,13 +327,18 @@ function pieceWorldPos(type, gx, gy) {
     : new THREE.Vector3(gx * CELL, gy * CELL + HALF, 0);    // cell centre
 }
 
-function makePieceMesh(type, color, rot, seed) {
-  return PIECES[type].kind === 'cage' ? makeCageMesh(type, color, seed) : makeTubeMesh(type, color, rot);
+function makePieceMesh(type, color, rot) {
+  return PIECES[type].kind === 'cage' ? makeCageMesh(type, color) : makeTubeMesh(type, color, rot);
 }
 
-function addPiece(type, gx, gy, rot = 0, color = 0) {
-  const piece = { type, gx, gy, rot, color, seed: Math.random() * 10, obj: null, slots: null };
-  if (PIECES[type].kind === 'cage') piece.slots = new Array(PIECES[type].w).fill(null);
+function addPiece(type, gx, gy, rot = 0, color = 0, bed = 0.15) {
+  const piece = { type, gx, gy, rot, color, bed, seed: 0, obj: null, slots: null, sand: null, handle: null };
+  piece.seed = gx * 1.7 + gy * 3.1;   // hills depend on position, so shared links look the same
+  if (PIECES[type].kind === 'cage') {
+    piece.slots = new Map();       // "slot,level" -> item
+    piece.platforms = new Map();   // "slot,level" -> platform
+    piece.ramps = new Map();       // "slot,level" -> ramp (level = the top end)
+  }
   pieces.push(piece);
   drawPiece(piece);
   for (const [x, y] of cellsOf(type, gx, gy)) cells.set(key(x, y), piece);
@@ -284,14 +347,29 @@ function addPiece(type, gx, gy, rot = 0, color = 0) {
 
 function drawPiece(piece) {
   if (piece.obj) scene.remove(piece.obj);
-  piece.obj = makePieceMesh(piece.type, piece.color, piece.rot, piece.seed);
+  piece.obj = makePieceMesh(piece.type, piece.color, piece.rot);
   piece.obj.position.copy(pieceWorldPos(piece.type, piece.gx, piece.gy));
   piece.obj.userData.piece = piece;
   scene.add(piece.obj);
+  if (PIECES[piece.type].kind === 'cage') {
+    piece.sand = null;
+    redrawSand(piece);
+    piece.handle = makeSandHandle(piece);
+    piece.obj.add(piece.handle);
+    placeSandHandle(piece);
+    drawFixtures(piece);
+  }
+}
+
+// Rebuild just the sand (fast, used while dragging the handle)
+function redrawSand(piece) {
+  if (piece.sand) piece.obj.remove(piece.sand);
+  piece.sand = piece.bed > 0.005 ? makeSandMesh(piece) : null;
+  if (piece.sand) piece.obj.add(piece.sand);
 }
 
 function removePiece(piece) {
-  if (piece.slots) for (const it of piece.slots) if (it) removeItem(it);
+  if (piece.slots) for (const it of [...piece.slots.values()]) removeItem(it);
   for (const [x, y] of cellsOf(piece.type, piece.gx, piece.gy)) cells.delete(key(x, y));
   scene.remove(piece.obj);
   pieces.splice(pieces.indexOf(piece), 1);
@@ -299,10 +377,10 @@ function removePiece(piece) {
 
 function movePiece(piece, gx, gy, rot, color) {
   for (const [x, y] of cellsOf(piece.type, piece.gx, piece.gy)) cells.delete(key(x, y));
-  Object.assign(piece, { gx, gy, rot, color });
+  Object.assign(piece, { gx, gy, rot, color, seed: gx * 1.7 + gy * 3.1 });
   for (const [x, y] of cellsOf(piece.type, gx, gy)) cells.set(key(x, y), piece);
   drawPiece(piece);
-  if (piece.slots) piece.slots.forEach((it) => it && positionItem(it));
+  if (piece.slots) for (const it of piece.slots.values()) positionItem(it);
 }
 
 // Which sides of a tube are open after rotating
@@ -311,16 +389,120 @@ function openSides(piece) {
 }
 
 // =====================================================================
-// 6. ITEMS inside cages
+// 6. PLATFORMS, RAMPS and ITEMS inside cages
+// Inside a cage, "slot" = which column (0 = left) and "level" = which floor
+// (0 = the sand, 1 = first platform height, 2 = second …)
 // =====================================================================
-function addItem(type, cage, slot) {
+const slotKey = (slot, level) => `${slot},${level}`;
+const platformMat = mat('platform', () => new THREE.MeshStandardMaterial({ color: '#5ccf6a', roughness: 0.6 }));
+const rampMat = mat('ramp', () => new THREE.MeshStandardMaterial({ color: '#cdb38b', roughness: 0.8 }));
+const cleatMat = mat('cleat', () => new THREE.MeshStandardMaterial({ color: '#9c7b54', roughness: 0.8 }));
+
+// Height of a floor (sand or platform) in world space
+function floorY(cage, slot, level, z) {
+  if (level === 0) return sandY(cage, (cage.gx + slot) * CELL, z);
+  return cage.gy * CELL + level * CELL;
+}
+
+// What's at a grid cell inside a cage
+function cageSlotAt(gx, gy) {
+  const p = cells.get(key(gx, gy));
+  if (!p || PIECES[p.type].kind !== 'cage') return null;
+  return { cage: p, slot: gx - p.gx, level: gy - p.gy };
+}
+
+const hasPlatform = (cage, slot, level) => level === 0 || cage.platforms.has(slotKey(slot, level));
+
+// ---- meshes (built in the cage's own coordinates, then added to the cage) ----
+function makePlatformMesh(cage, slot, level) {
+  const g = new THREE.Group();
+  const board = new THREE.Mesh(new THREE.BoxGeometry(CELL - 0.02, 0.05, CAGE_DEPTH - 0.12), platformMat);
+  board.position.set((slot + 0.5) * CELL, level * CELL - 0.025, 0);
+  board.castShadow = board.receiveShadow = true;
+  g.add(board);
+  // A platform touching a side wall gets a tube door at that height
+  if (slot === 0) addRing(g, 3, HALF, level * CELL + HALF);
+  if (slot === PIECES[cage.type].w - 1) addRing(g, 1, (slot + 0.5) * CELL, level * CELL + HALF);
+  return g;
+}
+
+function makeRampMesh(cage, slot, level, dir) {
+  const g = new THREE.Group();
+  const lx = (slot + 0.5 - dir * 0.3) * CELL;              // bottom end
+  const hx = (slot + 0.5 + dir * 0.5) * CELL;              // top end = edge of the platform
+  const ly = level - 1 === 0 ? TRAY_Y : (level - 1) * CELL;   // fixed: starts on the cage floor, ignores the sand
+  const hy = level * CELL;
+  const len = Math.hypot(hx - lx, hy - ly), ang = Math.atan2(hy - ly, hx - lx);
+  const plank = new THREE.Mesh(new THREE.BoxGeometry(len, 0.035, 0.5), rampMat);
+  plank.position.set((lx + hx) / 2, (ly + hy) / 2, HAM_Z);
+  plank.rotation.z = ang;
+  plank.castShadow = plank.receiveShadow = true;
+  g.add(plank);
+  for (let i = 1; i < 5; i++) {                            // little steps for grip
+    const c = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.46), cleatMat);
+    c.position.set(lx + (hx - lx) * i / 5, ly + (hy - ly) * i / 5 + 0.03, HAM_Z);
+    g.add(c);
+  }
+  return g;
+}
+
+function makeFixtureMesh(kind, cage, slot, level, dir) {
+  return kind === 'platform' ? makePlatformMesh(cage, slot, level) : makeRampMesh(cage, slot, level, dir);
+}
+
+function drawFixtures(cage) {
+  for (const f of [...cage.platforms.values(), ...cage.ramps.values()]) {
+    if (f.obj) cage.obj.remove(f.obj);
+    f.obj = makeFixtureMesh(f.kind, cage, f.slot, f.level, f.dir);
+    f.obj.userData.fixture = f;
+    cage.obj.add(f.obj);
+  }
+}
+
+// ---- rules ----
+function canPlaceFixture(kind, cage, slot, level, dir, ignore = null) {
+  const { w, h } = PIECES[cage.type];
+  if (level < 1 || level > h - 1) return false;
+  const k = slotKey(slot, level);
+  const pOther = cage.platforms.get(k), rOther = cage.ramps.get(k);
+  if (kind === 'platform') return (!pOther || pOther === ignore) && (!rOther || rOther === ignore);
+  const top = slot + dir;
+  return top >= 0 && top < w &&
+    (!rOther || rOther === ignore) && (!pOther || pOther === ignore) &&
+    cage.platforms.has(slotKey(top, level)) &&            // must lead up to a platform
+    hasPlatform(cage, slot, level - 1);                    // and start on a floor
+}
+
+function addFixture(kind, cage, slot, level, dir = 1) {
+  const f = { kind, cage, slot, level, dir, obj: null };
+  (kind === 'platform' ? cage.platforms : cage.ramps).set(slotKey(slot, level), f);
+  drawFixtures(cage);
+  return f;
+}
+
+function removeFixture(f) {
+  const cage = f.cage;
+  (f.kind === 'platform' ? cage.platforms : cage.ramps).delete(slotKey(f.slot, f.level));
+  if (f.obj) cage.obj.remove(f.obj);
+  if (f.kind === 'platform') {
+    const it = cage.slots.get(slotKey(f.slot, f.level));
+    if (it) removeItem(it);                                  // things on the shelf go too
+    // ramps that no longer lead anywhere are removed
+    for (const r of [...cage.ramps.values()]) {
+      if (!canPlaceFixture('ramp', cage, r.slot, r.level, r.dir, r)) removeFixture(r);
+    }
+  }
+}
+
+// ---- items ----
+function addItem(type, cage, slot, level = 0) {
   const obj = prepare(itemTemplates[type].clone(true));
-  const item = { type, cage, slot, obj, food: 5, water: 1, spin: 0 };
+  const item = { type, cage, slot, level, obj, food: 5, water: 1, spin: 0 };
   obj.userData.item = item;
   if (type === 'food_bowl') item.foodPieces = [1, 2, 3, 4, 5].map((i) => obj.getObjectByName('food_' + i));
   if (type === 'water_bottle') item.waterLevel = obj.getObjectByName('water_level');
   if (type === 'wheel') { item.spinNode = obj.getObjectByName('wheel_spin'); obj.rotation.y = Math.PI / 2; }
-  cage.slots[slot] = item;
+  cage.slots.set(slotKey(slot, level), item);
   positionItem(item);
   scene.add(obj);
   items.push(item);
@@ -328,33 +510,31 @@ function addItem(type, cage, slot) {
 }
 
 function positionItem(item) {
-  const c = item.cage;
-  item.obj.position.set((c.gx + item.slot) * CELL, c.gy * CELL + 0.08, ITEM_Z);
+  const x = (item.cage.gx + item.slot) * CELL;
+  item.obj.position.set(x, floorY(item.cage, item.slot, item.level, ITEM_Z), ITEM_Z);
 }
 
 function removeItem(item) {
   releaseHamstersFrom(item);
-  item.cage.slots[item.slot] = null;
+  item.cage.slots.delete(slotKey(item.slot, item.level));
   scene.remove(item.obj);
   items.splice(items.indexOf(item), 1);
 }
 
-function moveItem(item, cage, slot) {
-  item.cage.slots[item.slot] = null;
-  item.cage = cage;
-  item.slot = slot;
-  cage.slots[slot] = item;
+function moveItem(item, cage, slot, level) {
+  item.cage.slots.delete(slotKey(item.slot, item.level));
+  Object.assign(item, { cage, slot, level });
+  cage.slots.set(slotKey(slot, level), item);
   positionItem(item);
 }
 
-// The cage floor cell under a grid cell (or null)
-function cageSlotAt(gx, gy) {
-  const p = cells.get(key(gx, gy));
-  if (!p || PIECES[p.type].kind !== 'cage') return null;
-  return { cage: p, slot: gx - p.gx };
+function canPlaceItem(s, ignore = null) {
+  if (!s || !hasPlatform(s.cage, s.slot, s.level)) return false;
+  const there = s.cage.slots.get(slotKey(s.slot, s.level));
+  return !there || there === ignore;
 }
 
-const itemCell = (it) => key(it.cage.gx + it.slot, it.cage.gy);
+const itemCell = (it) => key(it.cage.gx + it.slot, it.cage.gy + it.level);
 
 function refillFood() { items.forEach((it) => { if (it.type === 'food_bowl') it.food = 5; }); }
 function fillWater()  { items.forEach((it) => { if (it.type === 'water_bottle') it.water = 1; }); }
@@ -369,7 +549,12 @@ function rebuildGraph() {
       for (let i = 0; i < PIECES[p.type].w; i++) {
         const gx = p.gx + i;
         graph.set(key(gx, p.gy), { key: key(gx, p.gy), gx, gy: p.gy, open: new Set([1, 3]), nbrs: [],
-          pos: new THREE.Vector3(gx * CELL, p.gy * CELL + FLOOR_Y, HAM_Z) });
+          pos: new THREE.Vector3(gx * CELL, sandY(p, gx * CELL, HAM_Z), HAM_Z) });
+      }
+      for (const f of p.platforms.values()) {               // shelves are walkable too
+        const gx = p.gx + f.slot, gy = p.gy + f.level;
+        graph.set(key(gx, gy), { key: key(gx, gy), gx, gy, open: new Set([1, 3]), nbrs: [],
+          pos: new THREE.Vector3(gx * CELL, floorY(p, f.slot, f.level, HAM_Z), HAM_Z) });
       }
     } else {
       graph.set(key(p.gx, p.gy), { key: key(p.gx, p.gy), gx: p.gx, gy: p.gy, open: openSides(p), nbrs: [],
@@ -381,6 +566,15 @@ function rebuildGraph() {
     for (const d of node.open) {
       const other = graph.get(key(node.gx + DIRS[d][0], node.gy + DIRS[d][1]));
       if (other && other.open.has((d + 2) % 4)) node.nbrs.push(other.key);
+    }
+  }
+  // Ramps join a lower floor to a platform
+  for (const p of pieces) {
+    if (!p.ramps) continue;
+    for (const r of p.ramps.values()) {
+      const low = graph.get(key(p.gx + r.slot, p.gy + r.level - 1));
+      const high = graph.get(key(p.gx + r.slot + r.dir, p.gy + r.level));
+      if (low && high) { low.nbrs.push(high.key); high.nbrs.push(low.key); }
     }
   }
   // Hamsters re-plan after the world changes
@@ -623,8 +817,8 @@ function followPath(h, dt) {
 
   // Face the way we're going: sideways in cages, nose up/down when climbing
   if (Math.abs(to.x) > 0.01) o.rotation.y = turnToward(o.rotation.y, to.x > 0 ? Math.PI / 2 : -Math.PI / 2, 0.2);
-  const climb = Math.abs(to.y) > Math.abs(to.x) + 0.01 ? (to.y > 0 ? -1.2 : 1.2) : 0;
-  o.rotation.x = THREE.MathUtils.lerp(o.rotation.x, climb, 0.2);
+  const climb = THREE.MathUtils.clamp(-Math.atan2(to.y, Math.hypot(to.x, to.z)), -1.3, 1.3);  // nose up/down
+  o.rotation.x = THREE.MathUtils.lerp(o.rotation.x, dist > 0.02 ? climb : 0, 0.2);
 
   if (dist <= step) {
     o.position.copy(next.pos);
@@ -637,10 +831,11 @@ function followPath(h, dt) {
 
 // Where a hamster stands to use an item
 function useSpot(item) {
-  const c = item.cage;
-  const x = (c.gx + item.slot) * CELL, y = c.gy * CELL + 0.08;
+  const x = (item.cage.gx + item.slot) * CELL;
+  const y = item.obj.position.y;                       // the item already sits on the sand
   if (item.type === 'wheel') return new THREE.Vector3(x, y + 0.09, ITEM_Z);
-  return new THREE.Vector3(x, y + 0.02, ITEM_Z + 0.4);
+  const front = item.level === 0 ? (y + sandY(item.cage, x, ITEM_Z + 0.4)) / 2 : y;
+  return new THREE.Vector3(x, front + 0.01, ITEM_Z + 0.4);
 }
 
 function updateHamster(h, dt, time) {
@@ -762,21 +957,35 @@ scene.add(selectRing);
 const SAVE_KEY = 'hammy-save-v3';
 const PIECE_BY_CODE = Object.fromEntries(Object.entries(PIECES).map(([t, d]) => [d.code, t]));
 const ITEM_BY_CODE = Object.fromEntries(Object.entries(ITEMS).map(([t, d]) => [d.code, t]));
+// platforms: f gx.gy      ramps: a gx.gy.direction (0 = rises to the right, 1 = to the left)
 
 function encodeLayout() {
-  const p = pieces.map((x) => `${PIECES[x.type].code}${x.gx}.${x.gy}.${x.rot}.${x.color}`);
-  const i = items.map((x) => `${ITEMS[x.type].code}${x.cage.gx + x.slot}.${x.cage.gy}`);
-  return [...p, ...i].join('_');
+  const p = pieces.map((x) => `${PIECES[x.type].code}${x.gx}.${x.gy}.${x.rot}.${x.color}` +
+    (PIECES[x.type].kind === 'cage' ? `.${Math.round(x.bed * 20)}` : ''));
+  const f = [];
+  for (const c of pieces) {
+    if (!c.platforms) continue;
+    for (const pl of c.platforms.values()) f.push(`f${c.gx + pl.slot}.${c.gy + pl.level}`);
+    for (const r of c.ramps.values()) f.push(`a${c.gx + r.slot}.${c.gy + r.level}.${r.dir === 1 ? 0 : 1}`);
+  }
+  f.sort((x, y) => (x[0] === 'f' ? 0 : 1) - (y[0] === 'f' ? 0 : 1));   // platforms before ramps
+  const i = items.map((x) => `${ITEMS[x.type].code}${x.cage.gx + x.slot}.${x.cage.gy + x.level}`);
+  return [...p, ...f, ...i].join('_');
 }
 
 function decodeLayout(code) {
-  const out = { pieces: [], items: [] };
+  const out = { pieces: [], platforms: [], ramps: [], items: [] };
   for (const part of (code || '').split('_')) {
     const nums = part.slice(1).split('.').map(Number);
     if (!nums.every(Number.isInteger)) continue;
-    if (PIECE_BY_CODE[part[0]] && nums.length === 4) {
+    if (PIECE_BY_CODE[part[0]] && (nums.length === 4 || nums.length === 5)) {
       out.pieces.push({ type: PIECE_BY_CODE[part[0]], gx: nums[0], gy: Math.max(0, nums[1]),
-        rot: ((nums[2] % 4) + 4) % 4, color: nums[3] });
+        rot: ((nums[2] % 4) + 4) % 4, color: nums[3],
+        bed: nums.length === 5 ? THREE.MathUtils.clamp(nums[4], 0, 20) / 20 : 0.15 });
+    } else if (part[0] === 'f' && nums.length === 2) {
+      out.platforms.push({ gx: nums[0], gy: nums[1] });
+    } else if (part[0] === 'a' && nums.length === 3) {
+      out.ramps.push({ gx: nums[0], gy: nums[1], dir: nums[2] === 1 ? -1 : 1 });
     } else if (ITEM_BY_CODE[part[0]] && nums.length === 2) {
       out.items.push({ type: ITEM_BY_CODE[part[0]], gx: nums[0], gy: nums[1] });
     }
@@ -810,11 +1019,19 @@ function buildGame(layoutCode, hamsterCode) {
   const L = decodeLayout(layoutCode);
   for (const p of L.pieces) {
     const color = Math.min(p.color, (PIECES[p.type].kind === 'cage' ? CAGE_COLORS : TUBE_COLORS).length - 1);
-    if (canPlacePiece(p.type, p.gx, p.gy)) addPiece(p.type, p.gx, p.gy, p.rot, color);
+    if (canPlacePiece(p.type, p.gx, p.gy)) addPiece(p.type, p.gx, p.gy, p.rot, color, p.bed);
+  }
+  for (const pl of L.platforms) {
+    const s = cageSlotAt(pl.gx, pl.gy);
+    if (s && canPlaceFixture('platform', s.cage, s.slot, s.level, 1)) addFixture('platform', s.cage, s.slot, s.level);
+  }
+  for (const r of L.ramps) {
+    const s = cageSlotAt(r.gx, r.gy);
+    if (s && canPlaceFixture('ramp', s.cage, s.slot, s.level, r.dir)) addFixture('ramp', s.cage, s.slot, s.level, r.dir);
   }
   for (const it of L.items) {
     const s = cageSlotAt(it.gx, it.gy);
-    if (s && !s.cage.slots[s.slot]) addItem(it.type, s.cage, s.slot);
+    if (canPlaceItem(s)) addItem(it.type, s.cage, s.slot, s.level);
   }
   rebuildGraph();
   let looks = decodeHamsters(hamsterCode);
@@ -904,9 +1121,10 @@ function ghostify(obj) {
 
 function makeGhost() {
   if (tool.ghost) scene.remove(tool.ghost);
-  tool.ghost = tool.what === 'piece'
-    ? ghostify(makePieceMesh(tool.type, tool.color, tool.rot, 1))
-    : ghostify(itemTemplates[tool.type].clone(true));
+  tool.ghostKey = null;
+  tool.ghost = tool.what === 'piece' ? ghostify(makePieceMesh(tool.type, tool.color, tool.rot))
+    : tool.what === 'item' ? ghostify(itemTemplates[tool.type].clone(true))
+    : new THREE.Group();            // fixtures: built once we know which cage it's in
   if (tool.what === 'item' && tool.type === 'wheel') tool.ghost.rotation.y = Math.PI / 2;
   tool.ghost.visible = false;
   scene.add(tool.ghost);
@@ -926,8 +1144,9 @@ function startNew(what, type) {
 function startMove(what, thing) {
   cancelTool();
   if (what === 'item') releaseHamstersFrom(thing);
-  tool = { kind: 'move', what, type: thing.type, target: thing,
-           rot: thing.rot || 0, color: thing.color || 0 };
+  const type = what === 'fixture' ? thing.kind : thing.type;
+  const rot = what === 'fixture' ? (thing.dir === 1 ? 0 : 1) : (thing.rot || 0);
+  tool = { kind: 'move', what, type, target: thing, rot, color: thing.color || 0 };
   thing.obj.visible = false;
   makeGhost();
   updateBuildUI();
@@ -942,6 +1161,12 @@ function cancelTool() {
 }
 
 function rotateTool() {
+  if (tool && tool.what === 'fixture' && tool.type === 'ramp') {   // flip which way the ramp rises
+    tool.rot = 1 - tool.rot;
+    tool.ghostKey = null;
+    updateGhost();
+    return;
+  }
   if (!tool || tool.what !== 'piece' || PIECES[tool.type].kind !== 'tube') return;
   tool.rot = (tool.rot + 1) % 4;
   makeGhost();
@@ -961,7 +1186,9 @@ function deleteTool() {
   const thing = tool.target, what = tool.what;
   scene.remove(tool.ghost);
   tool = null;
-  if (what === 'piece') removePiece(thing); else removeItem(thing);
+  if (what === 'piece') removePiece(thing);
+  else if (what === 'fixture') removeFixture(thing);
+  else removeItem(thing);
   rebuildGraph();
   saveGame();
   updateBuildUI();
@@ -984,29 +1211,42 @@ function updateGhost() {
     tool.gx = gx; tool.gy = gy;
     g.position.copy(pieceWorldPos(tool.type, gx, gy));
     tool.ok = canPlacePiece(tool.type, gx, gy, tool.kind === 'move' ? tool.target : null);
-  } else {
+  } else if (tool.what === 'item') {
     const gx = Math.round(wallPoint.x / CELL), gy = Math.floor(wallPoint.y / CELL);
     const s = cageSlotAt(gx, gy);
-    if (s) {
-      tool.slot = s;
-      g.position.set((s.cage.gx + s.slot) * CELL, s.cage.gy * CELL + 0.08, ITEM_Z);
-      const there = s.cage.slots[s.slot];
-      tool.ok = !there || there === tool.target;
-    } else {
-      tool.slot = null;
-      g.position.set(gx * CELL, gy * CELL + 0.08, ITEM_Z);
-      tool.ok = false;
+    tool.slot = s;
+    if (s) g.position.set((s.cage.gx + s.slot) * CELL, floorY(s.cage, s.slot, s.level, ITEM_Z), ITEM_Z);
+    else g.position.set(gx * CELL, gy * CELL + 0.08, ITEM_Z);
+    tool.ok = canPlaceItem(s, tool.target);
+  } else {
+    // platform / ramp: rebuild the ghost when the cell changes
+    const gx = Math.round(wallPoint.x / CELL), gy = Math.floor(wallPoint.y / CELL);
+    const s = cageSlotAt(gx, gy);
+    tool.slot = s;
+    const dir = tool.rot === 0 ? 1 : -1;
+    const k = s ? `${pieces.indexOf(s.cage)}:${s.slot}:${s.level}:${dir}` : 'none';
+    if (k !== tool.ghostKey) {
+      tool.ghostKey = k;
+      scene.remove(tool.ghost);
+      tool.ghost = s && s.level >= 1
+        ? ghostify(makeFixtureMesh(tool.type, s.cage, s.slot, s.level, dir)) : new THREE.Group();
+      if (s) tool.ghost.position.copy(s.cage.obj.position);
+      scene.add(tool.ghost);
     }
+    tool.ok = !!s && canPlaceFixture(tool.type, s.cage, s.slot, s.level, dir,
+                                     tool.kind === 'move' ? tool.target : null);
   }
-  g.visible = true;
+  tool.ghost.visible = true;
   tintGhost(tool.ok);
 }
 
 function buildClick() {
   if (!tool) {
-    // pick something up: items first (they're inside cages), then pieces
+    // pick something up: items first (they're inside cages), then ramps/platforms, then pieces
     const it = thingUnderMouse('item');
     if (it) return startMove('item', it);
+    const fx = thingUnderMouse('fixture');
+    if (fx) return startMove('fixture', fx);
     const p = thingUnderMouse('piece');
     if (p) startMove('piece', p);
     return;
@@ -1015,9 +1255,15 @@ function buildClick() {
   if (tool.what === 'piece') {
     if (tool.kind === 'new') addPiece(tool.type, tool.gx, tool.gy, tool.rot, tool.color);
     else { movePiece(tool.target, tool.gx, tool.gy, tool.rot, tool.color); cancelTool(); }
+  } else if (tool.what === 'item') {
+    const s = tool.slot;
+    if (tool.kind === 'new') addItem(tool.type, s.cage, s.slot, s.level);
+    else { moveItem(tool.target, s.cage, s.slot, s.level); cancelTool(); }
   } else {
-    if (tool.kind === 'new') addItem(tool.type, tool.slot.cage, tool.slot.slot);
-    else { moveItem(tool.target, tool.slot.cage, tool.slot.slot); cancelTool(); }
+    const s = tool.slot, dir = tool.rot === 0 ? 1 : -1;
+    if (tool.kind === 'move') { const old = tool.target; cancelTool(); removeFixture(old); }
+    addFixture(tool.type, s.cage, s.slot, s.level, dir);
+    tool && (tool.ghostKey = null);
   }
   rebuildGraph();
   saveGame();
@@ -1027,6 +1273,7 @@ function setMode(m) {
   mode = m;
   cancelTool();
   grid.visible = mode === 'build';
+  for (const p of pieces) if (p.handle) p.handle.visible = mode === 'build';
   document.getElementById('careBtn').style.opacity = mode === 'care' ? 1 : 0.45;
   document.getElementById('buildBtn').style.opacity = mode === 'build' ? 1 : 0.45;
   document.getElementById('careTools').style.display = mode === 'care' ? 'block' : 'none';
@@ -1208,10 +1455,12 @@ function buildPalette() {
     pal.appendChild(b);
   };
   for (const [t, d] of Object.entries(PIECES)) addBtn('piece', t, d);
+  for (const [t, d] of Object.entries(FIXTURES)) addBtn('fixture', t, d);
   for (const [t, d] of Object.entries(ITEMS)) addBtn('item', t, d);
 }
 
 function updateBuildUI() {
+  for (const p of pieces) if (p.handle) p.handle.visible = mode === 'build' && !tool;
   document.querySelectorAll('#palette button').forEach((b) => {
     const on = tool && tool.kind === 'new' && tool.type === b.dataset.type;
     b.style.borderColor = on ? '#8e7dbe' : '#eee';
@@ -1219,9 +1468,12 @@ function updateBuildUI() {
   });
   const hint = document.getElementById('buildHint');
   if (!hint) return;
-  const isTube = tool && tool.what === 'piece' && PIECES[tool.type].kind === 'tube';
+  const isTube = tool && ((tool.what === 'piece' && PIECES[tool.type].kind === 'tube') ||
+                           (tool.what === 'fixture' && tool.type === 'ramp'));
   hint.textContent = !tool ? 'Pick a piece, or click one to move it'
-    : tool.what === 'item' ? 'Put it inside a cage'
+    : tool.what === 'item' ? 'Put it on a cage floor or a platform'
+    : tool.type === 'platform' ? 'Click inside a cage, above the sand'
+    : tool.type === 'ramp' ? 'Put it next to a platform · R flips it'
     : tool.kind === 'new' ? 'Click to place · tubes join at the yellow rings' : 'Click to drop it here';
   document.getElementById('rotateBtn').style.opacity = isTube ? 1 : 0.4;
   document.getElementById('paintBtn').style.opacity = tool && tool.what === 'piece' ? 1 : 0.4;
@@ -1268,8 +1520,10 @@ function updateMouse(e) {
 }
 
 function thingUnderMouse(what) {
-  const list = what === 'item' ? items : what === 'piece' ? pieces : hamsters;
-  const tag = what === 'item' ? 'item' : what === 'piece' ? 'piece' : 'hamster';
+  const fixtures = what === 'fixture'
+    ? pieces.flatMap((p) => p.platforms ? [...p.platforms.values(), ...p.ramps.values()] : []) : [];
+  const list = what === 'item' ? items : what === 'piece' ? pieces : what === 'fixture' ? fixtures : hamsters;
+  const tag = what;
   const hits = raycaster.intersectObjects(list.map((x) => x.obj).filter((o) => o.visible), true);
   for (const hit of hits) {
     let o = hit.object;
@@ -1286,9 +1540,35 @@ function updateDragPoint() {
 
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
+// Sand handle drag
+let sandDrag = null;
+const frontPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -CAGE_DEPTH / 2);
+const frontPoint = new THREE.Vector3();
+
+function handleUnderMouse() {
+  const handles = pieces.filter((p) => p.handle && p.handle.visible).map((p) => p.handle);
+  const hit = raycaster.intersectObjects(handles, false)[0];
+  return hit ? hit.object.userData.sandHandle : null;
+}
+
+function dragSand() {
+  if (!raycaster.ray.intersectPlane(frontPlane, frontPoint)) return;
+  const p = sandDrag;
+  const maxH = PIECES[p.type].h * CELL * 0.8;
+  const base = p.gy * CELL + TRAY_Y;
+  p.bed = THREE.MathUtils.clamp((frontPoint.y - base) / maxH, 0, 1);
+  redrawSand(p);
+  placeSandHandle(p);
+  for (const it of p.slots.values()) positionItem(it);   // items ride up/down with the sand (ramps stay put)
+}
+
 canvas.addEventListener('pointerdown', (e) => {
   downAt.set(e.clientX, e.clientY);
   updateMouse(e);
+  if (mode === 'build' && e.button === 0 && !tool) {
+    const p = handleUnderMouse();
+    if (p) { sandDrag = p; controls.enabled = false; canvas.style.cursor = 'ns-resize'; return; }
+  }
   if (mode !== 'care' || e.button !== 0) return;
   const h = thingUnderMouse('hamster');
   if (h) {
@@ -1306,9 +1586,11 @@ canvas.addEventListener('pointerdown', (e) => {
 
 canvas.addEventListener('pointermove', (e) => {
   updateMouse(e);
+  if (sandDrag) { dragSand(); return; }
   if (mode === 'build') {
     updateGhost();
-    canvas.style.cursor = tool ? 'crosshair' : (thingUnderMouse('item') || thingUnderMouse('piece') ? 'pointer' : 'grab');
+    canvas.style.cursor = tool ? 'crosshair' : handleUnderMouse() ? 'ns-resize'
+      : (thingUnderMouse('item') || thingUnderMouse('fixture') || thingUnderMouse('piece') ? 'pointer' : 'grab');
   } else if (heldHamster) {
     updateDragPoint();
   } else {
@@ -1318,6 +1600,7 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 canvas.addEventListener('pointerup', (e) => {
+  if (sandDrag) return;                                                         // handled below
   if (Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) >= 5) return;   // that was a drag
   updateMouse(e);
   if (mode === 'build') {
@@ -1326,6 +1609,15 @@ canvas.addEventListener('pointerup', (e) => {
     const it = thingUnderMouse('item');
     if (it && it.type === 'wheel') it.spin += 6;   // spin the wheel for fun
   }
+});
+
+// Finish a sand drag: hamsters re-plan on the new ground, then save
+addEventListener('pointerup', () => {
+  if (!sandDrag) return;
+  sandDrag = null;
+  controls.enabled = true;
+  rebuildGraph();
+  saveGame();
 });
 
 // Drop a carried hamster into the nearest cage or tube
