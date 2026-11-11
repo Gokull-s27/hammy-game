@@ -91,11 +91,8 @@ Promise.all(ALL_FILES.map((name) =>
   for (const clip of loaded.hamster.animations) actions[clip.name] = mixer.clipAction(clip);
   playAnim('idle');
 
-  // Starting layout
-  placeItem('food_bowl', 1.25, -0.75);
-  placeItem('water_bottle', 1.75, 0.5, -Math.PI / 2);
-  placeItem('wheel', -1.25, -0.5);
-  placeItem('house', -1.25, 0.75);
+  // Build the cage from a share link, your last save, or the starting layout
+  loadCage();
 
   buildPalette();
   loadingText.remove();
@@ -181,6 +178,111 @@ function canPlace(type, x, z, ignore = null) {
 
 function refillFood()  { items.forEach((it) => { if (it.type === 'food_bowl') it.food = 5; }); }
 function fillWater()   { items.forEach((it) => { if (it.type === 'water_bottle') it.water = 1; }); }
+
+// =====================================================================
+// 4b. SAVE & SHARE
+// A cage is written as a short code, e.g.  b5.-3.0_h-5.-2.0
+//   letter = item type, then grid X . grid Z . quarter-turns
+// =====================================================================
+const SAVE_KEY = 'hammy-cage-v1';
+const TYPE_CODES = { food_bowl: 'b', water_bottle: 'w', wheel: 'h', house: 'o', ramp: 'r',
+                     platform: 'p', bridge: 'g', swing: 's', chew_toy: 'c' };
+const CODE_TYPES = Object.fromEntries(Object.entries(TYPE_CODES).map(([t, c]) => [c, t]));
+const DEFAULT_CAGE = 'b5.-3.0_w7.2.3_h-5.-2.0_o-5.3.0';
+
+// Cage -> code
+function encodeCage() {
+  return items.map((it) => {
+    const quarter = ((Math.round(it.obj.rotation.y / (Math.PI / 2)) % 4) + 4) % 4;
+    return TYPE_CODES[it.type] + Math.round(it.obj.position.x / GRID) + '.' +
+           Math.round(it.obj.position.z / GRID) + '.' + quarter;
+  }).join('_');
+}
+
+// Code -> list of items (anything broken is skipped)
+function decodeCage(code) {
+  const list = [];
+  const lx = CAGE_W / 2 - 0.2, lz = CAGE_D / 2 - 0.2;
+  for (const part of code.split('_')) {
+    const type = CODE_TYPES[part[0]];
+    const [gx, gz, q] = part.slice(1).split('.').map(Number);
+    if (!type || ![gx, gz, q].every(Number.isFinite)) continue;
+    list.push({
+      type,
+      x: THREE.MathUtils.clamp(gx * GRID, -lx, lx),
+      z: THREE.MathUtils.clamp(gz * GRID, -lz, lz),
+      rot: q * Math.PI / 2
+    });
+  }
+  return list;
+}
+
+function buildCage(code) {
+  while (items.length) removeItem(items[0]);
+  for (const it of decodeCage(code)) placeItem(it.type, it.x, it.z, it.rot);
+}
+
+// Save in the browser (survives refresh). Wrapped in try in case storage is blocked.
+function saveCage() {
+  try { localStorage.setItem(SAVE_KEY, encodeCage()); } catch (e) { /* storage not available */ }
+}
+
+function loadCage() {
+  const fromLink = new URLSearchParams(location.search).get('cage');
+  let saved = null;
+  try { saved = localStorage.getItem(SAVE_KEY); } catch (e) { /* storage not available */ }
+
+  if (fromLink) {
+    buildCage(fromLink);
+    history.replaceState(null, '', location.pathname);  // tidy the address bar
+    saveCage();                                          // it's your cage now
+    showToast('Loaded a shared cage! 🐹');
+  } else {
+    buildCage(saved ?? DEFAULT_CAGE);
+  }
+}
+
+async function shareCage() {
+  const url = location.origin + location.pathname + '?cage=' + encodeCage();
+  try {
+    await navigator.clipboard.writeText(url);
+    showToast('🔗 Link copied! Paste it anywhere to share your cage.');
+  } catch (e) {
+    showToast(`Copy this link:<br><input value="${url}" style="width:320px; margin-top:6px;"
+               onclick="this.select()" readonly>`, 8000);
+  }
+}
+
+let resetArmed = false;
+function newCage() {
+  const b = document.getElementById('resetBtn');
+  if (!resetArmed) {                 // first click: ask to be sure
+    resetArmed = true;
+    b.textContent = 'Sure? Click again';
+    setTimeout(() => { resetArmed = false; b.textContent = '🧹 New cage'; }, 3000);
+    return;
+  }
+  resetArmed = false;
+  b.textContent = '🧹 New cage';
+  cancelTool();
+  buildCage(DEFAULT_CAGE);
+  saveCage();
+  showToast('Fresh cage! ✨');
+}
+
+// Small message that pops up at the top of the screen
+const toast = document.createElement('div');
+toast.style.cssText = `position:fixed; top:16px; left:50%; transform:translateX(-50%);
+  background:#333; color:white; padding:10px 16px; border-radius:10px; font:14px sans-serif;
+  display:none; z-index:10; text-align:center;`;
+document.body.appendChild(toast);
+let toastTimer;
+function showToast(html, ms = 2500) {
+  toast.innerHTML = html;
+  toast.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (toast.style.display = 'none'), ms);
+}
 
 // =====================================================================
 // 5. HAMSTER BRAIN
@@ -489,6 +591,7 @@ function deleteSelected() {
     scene.remove(tool.ghost);
     tool = null;
     removeItem(item);
+    saveCage();
     updatePaletteHighlight();
   }
 }
@@ -526,6 +629,7 @@ function buildClick() {
       tool.item.vel.set(0, 0, 0);
       cancelTool();
     }
+    saveCage();
   } else {
     const item = itemUnderMouse();
     if (item) startMoving(item);
@@ -570,12 +674,18 @@ ui.innerHTML = `
     ${btn('feedBtn', '🥣 Refill food', '#f4a261', 'width:100%; margin-top:8px;')}
     ${btn('waterBtn', '💧 Fill water', '#4ea8de', 'width:100%; margin-top:6px;')}
     <div style="font-size:11px; color:#888; margin-top:8px;">Tip: click toys to play with them!</div>
+  </div>
+  <div style="display:flex; gap:6px; margin-top:10px;">
+    ${btn('shareBtn', '🔗 Share', '#2a9d8f', 'flex:1; font-size:12px;')}
+    ${btn('resetBtn', '🧹 New cage', '#999', 'flex:1; font-size:12px;')}
   </div>`;
 document.body.appendChild(ui);
 document.getElementById('feedBtn').onclick = refillFood;
 document.getElementById('waterBtn').onclick = fillWater;
 document.getElementById('careBtn').onclick = () => setMode('care');
 document.getElementById('buildBtn').onclick = () => setMode('build');
+document.getElementById('shareBtn').onclick = shareCage;
+document.getElementById('resetBtn').onclick = newCage;
 
 // Bottom build bar
 const buildBar = document.createElement('div');
