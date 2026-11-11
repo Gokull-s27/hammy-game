@@ -2,141 +2,172 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-// ============ 1. SCENE ============
+// ============ 1. SCENE, CAMERA, RENDERER, LIGHTS ============
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#fdf1e1');
 
-// ============ 2. CAMERA ============
 const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
-camera.position.set(0, 3.5, 4.5);
+camera.position.set(0, 3.6, 4.6);
 
-// ============ 3. RENDERER ============
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
 
-// ============ 4. LIGHTS ============
 scene.add(new THREE.AmbientLight('white', 0.8));
-const sun = new THREE.DirectionalLight('white', 1.5);
+const sun = new THREE.DirectionalLight('white', 1.6);
 sun.position.set(3, 6, 4);
 sun.castShadow = true;
+sun.shadow.camera.left = -4; sun.shadow.camera.right = 4;
+sun.shadow.camera.top = 4;   sun.shadow.camera.bottom = -4;
+sun.shadow.mapSize.set(2048, 2048);
 scene.add(sun);
 
-// ============ 5. CAGE ============
-const CAGE_W = 4;
-const CAGE_D = 3;
-const WALL_H = 0.6;
-const GROUND_Y = 0.05;
-
 const room = new THREE.Mesh(
-  new THREE.PlaneGeometry(20, 20),
+  new THREE.PlaneGeometry(30, 30),
   new THREE.MeshStandardMaterial({ color: '#f3e3cc' })
 );
 room.rotation.x = -Math.PI / 2;
 room.receiveShadow = true;
 scene.add(room);
 
-const bedding = new THREE.Mesh(
-  new THREE.BoxGeometry(CAGE_W, 0.05, CAGE_D),
-  new THREE.MeshStandardMaterial({ color: '#e8c99b' })
-);
-bedding.position.y = 0.025;
-bedding.receiveShadow = true;
-scene.add(bedding);
+// ============ 2. LAYOUT (where everything goes) ============
+const CAGE_W = 4, CAGE_D = 3;
+const GROUND_Y = 0.11;   // top of the bedding = where feet touch
 
-const wallMat = new THREE.MeshStandardMaterial({ color: '#bfe6ff', transparent: true, opacity: 0.35 });
-function addWall(w, d, x, z) {
-  const wall = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_H, d), wallMat);
-  wall.position.set(x, WALL_H / 2, z);
-  scene.add(wall);
-}
-addWall(CAGE_W, 0.05, 0, -CAGE_D / 2);
-addWall(CAGE_W, 0.05, 0,  CAGE_D / 2);
-addWall(0.05, CAGE_D, -CAGE_W / 2, 0);
-addWall(0.05, CAGE_D,  CAGE_W / 2, 0);
+const BOWL_POS   = new THREE.Vector3(1.3, GROUND_Y, -0.8);
+const BOTTLE_POS = new THREE.Vector3(1.75, GROUND_Y, 0.6);
+const WHEEL_POS  = new THREE.Vector3(-1.2, GROUND_Y, -0.6);
+const HOUSE_POS  = new THREE.Vector3(-1.4, GROUND_Y, 0.8);
 
-// ============ 6. FOOD BOWL ============
-const BOWL_POS = new THREE.Vector3(1.3, 0, -0.8);
-const MAX_FOOD = 5;
-let foodCount = MAX_FOOD;
+// Spots where the hamster stands to do things
+const EAT_SPOT      = new THREE.Vector3(1.3 - 0.32, GROUND_Y, -0.8 + 0.32);
+const DRINK_SPOT    = new THREE.Vector3(1.36, GROUND_Y, 0.6);
+const WHEEL_ENTRY   = new THREE.Vector3(-1.2, GROUND_Y, 0.15);
+const IN_WHEEL_POS  = new THREE.Vector3(-1.2, GROUND_Y + 0.09, -0.6);
 
-const bowl = new THREE.Group();
-bowl.position.copy(BOWL_POS);
-scene.add(bowl);
+// Places the hamster shouldn't pick as a random walking target
+const OBSTACLES = [
+  { pos: BOWL_POS, r: 0.4 }, { pos: BOTTLE_POS, r: 0.4 },
+  { pos: WHEEL_POS, r: 0.6 }, { pos: HOUSE_POS, r: 0.6 }
+];
 
-// The bowl itself (a cylinder that's wider at the top)
-const bowlMesh = new THREE.Mesh(
-  new THREE.CylinderGeometry(0.22, 0.17, 0.1, 24),
-  new THREE.MeshStandardMaterial({ color: '#6fb3e0' })
-);
-bowlMesh.position.y = 0.1;
-bowlMesh.castShadow = true;
-bowl.add(bowlMesh);
+// ============ 3. LOADING SCREEN ============
+const loadingText = document.createElement('div');
+loadingText.textContent = 'Loading… 🐹';
+loadingText.style.cssText = `position:fixed; inset:0; display:flex; align-items:center;
+  justify-content:center; font:bold 28px sans-serif; color:#a0682f; pointer-events:none;`;
+document.body.appendChild(loadingText);
 
-// Food pellets (little brown balls on top)
-const pellets = [];
-const pelletMat = new THREE.MeshStandardMaterial({ color: '#a0682f' });
-for (let i = 0; i < MAX_FOOD; i++) {
-  const pellet = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 8), pelletMat);
-  const angle = (i / MAX_FOOD) * Math.PI * 2;
-  pellet.position.set(Math.cos(angle) * 0.09, 0.17, Math.sin(angle) * 0.09);
-  bowl.add(pellet);
-  pellets.push(pellet);
+// ============ 4. LOAD MODELS ============
+const loader = new GLTFLoader();
+const loadModel = (name) => loader.loadAsync(`models/${name}.glb`);
+
+function addToScene(gltf, position, rotationY = 0) {
+  const obj = gltf.scene;
+  obj.position.copy(position);
+  obj.rotation.y = rotationY;
+  obj.traverse((p) => {
+    if (p.isMesh) { p.castShadow = true; p.receiveShadow = true; }
+  });
+  scene.add(obj);
+  return obj;
 }
 
-function showPellets() {
-  pellets.forEach((p, i) => (p.visible = i < foodCount));
+// Things we need to control later
+let hamster, mixer, actions = {}, currentAction = null;
+let wheelSpin, foodPieces = [], waterLevel;
+
+Promise.all([
+  loadModel('cage_base'), loadModel('cage_walls_clear'), loadModel('bedding'),
+  loadModel('food_bowl'), loadModel('water_bottle'), loadModel('wheel'),
+  loadModel('house'), loadModel('hamster')
+]).then(([cageBase, walls, bedding, bowl, bottle, wheel, house, ham]) => {
+
+  addToScene(cageBase, new THREE.Vector3(0, 0, 0));
+  addToScene(walls, new THREE.Vector3(0, 0, 0));
+  addToScene(bedding, new THREE.Vector3(0, 0, 0));
+
+  const bowlObj = addToScene(bowl, BOWL_POS);
+  for (let i = 1; i <= 5; i++) foodPieces.push(bowlObj.getObjectByName('food_' + i));
+
+  const bottleObj = addToScene(bottle, BOTTLE_POS, -Math.PI / 2); // nozzle faces into the cage
+  waterLevel = bottleObj.getObjectByName('water_level');
+
+  const wheelObj = addToScene(wheel, WHEEL_POS);
+  wheelSpin = wheelObj.getObjectByName('wheel_spin');
+
+  addToScene(house, HOUSE_POS, Math.PI / 4);
+
+  // Hamster + its animations
+  hamster = addToScene(ham, new THREE.Vector3(0, GROUND_Y, 0.3));
+  mixer = new THREE.AnimationMixer(hamster);
+  for (const clip of ham.animations) actions[clip.name] = mixer.clipAction(clip);
+  playAnim('idle');
+
+  loadingText.remove();
+}).catch((err) => {
+  loadingText.textContent = '❌ Could not load models – check the models folder (F12 → Console)';
+  console.error(err);
+});
+
+// Smoothly switch animation: 'idle' | 'walk' | 'eat'
+function playAnim(name, speed = 1) {
+  const next = actions[name];
+  if (!next) return;
+  next.timeScale = speed;
+  if (next === currentAction) return;
+  next.reset().play();
+  if (currentAction) currentAction.crossFadeTo(next, 0.2, false);
+  currentAction = next;
 }
 
-function refillFood() {
-  foodCount = MAX_FOOD;
-  showPellets();
+// ============ 5. FOOD & WATER ============
+let foodCount = 5;
+let water = 1;   // 1 = full bottle, 0 = empty
+
+function updateFoodAndWater() {
+  foodPieces.forEach((p, i) => { if (p) p.visible = i < foodCount; });
+  if (waterLevel) {
+    waterLevel.scale.y = Math.max(water, 0.001);
+    waterLevel.visible = water > 0.01;
+  }
 }
+function refillFood() { foodCount = 5; }
+function fillWater() { water = 1; }
 
-// The spot where the hamster stands to eat (in front of the bowl, toward the cage centre)
-const EAT_SPOT = BOWL_POS.clone().add(
-  new THREE.Vector3(0, 0, 0).sub(BOWL_POS).setY(0).normalize().multiplyScalar(0.45)
-);
-
-// ============ 7. HAMSTER ============
-const SIZE = 0.6;
-let hamster = null;
-new GLTFLoader().load(
-  'models/hamster.glb',
-  (gltf) => {
-    hamster = gltf.scene;
-    hamster.scale.setScalar(SIZE);
-    hamster.position.y = GROUND_Y;
-    hamster.traverse((p) => { if (p.isMesh) p.castShadow = true; });
-    scene.add(hamster);
-  },
-  undefined,
-  (err) => console.error('Could not load hamster.glb', err)
-);
-
-// ============ 8. HAMSTER BRAIN ============
-// Moods: 'rest' | 'walk' | 'goEat' | 'eat' | 'held' | 'fall'
-const HUNGER_DRAIN = 4;     // hunger lost per second (fast, so you can test)
-const HUNGRY_BELOW = 40;    // goes to eat when hunger is under this
-
+// ============ 6. HAMSTER BRAIN ============
+// Moods: rest | walk | goEat | eat | goDrink | drink | goWheel | run | held | fall
 const brain = {
-  mood: 'rest',
-  timer: 1,
-  target: new THREE.Vector3(),
-  speed: 0.6,
-  fallSpeed: 0,
-  hunger: 100               // 100 = full, 0 = starving
+  mood: 'rest', timer: 1, target: new THREE.Vector3(), speed: 0.55, fallSpeed: 0,
+  hunger: 100, thirst: 100, fun: 100        // 100 = perfectly happy
 };
+const DRAIN = { hunger: 2.5, thirst: 3, fun: 3.5 };  // per second (fast for testing)
+const LOW = 40;
 
-const isHungry = () => brain.hunger < HUNGRY_BELOW;
+const isHungry  = () => brain.hunger < LOW && foodCount > 0;
+const isThirsty = () => brain.thirst < LOW && water > 0.01;
+const isBored   = () => brain.fun < LOW;
+
+function decideWhatToDo() {
+  if (isThirsty()) return 'goDrink';
+  if (isHungry())  return 'goEat';
+  if (isBored())   return 'goWheel';
+  pickRandomSpot();
+  return 'walk';
+}
 
 function pickRandomSpot() {
-  const m = 0.4;
-  brain.target.set(
-    THREE.MathUtils.randFloat(-CAGE_W / 2 + m, CAGE_W / 2 - m), 0,
-    THREE.MathUtils.randFloat(-CAGE_D / 2 + m, CAGE_D / 2 - m)
-  );
+  const m = 0.45;
+  for (let tries = 0; tries < 20; tries++) {
+    brain.target.set(
+      THREE.MathUtils.randFloat(-CAGE_W / 2 + m, CAGE_W / 2 - m), GROUND_Y,
+      THREE.MathUtils.randFloat(-CAGE_D / 2 + m, CAGE_D / 2 - m)
+    );
+    const blocked = OBSTACLES.some(o =>
+      Math.hypot(o.pos.x - brain.target.x, o.pos.z - brain.target.z) < o.r);
+    if (!blocked) return;
+  }
 }
 
 function turnToward(current, target, amount) {
@@ -145,189 +176,220 @@ function turnToward(current, target, amount) {
   return current + diff * amount;
 }
 
+function faceDirection(x, z, amount = 0.15) {
+  hamster.rotation.y = turnToward(hamster.rotation.y, Math.atan2(x, z), amount);
+}
+
 function startResting(seconds) {
   brain.mood = 'rest';
   brain.timer = seconds;
 }
 
-// Walk toward a point with a waddle. Returns true when it arrives.
-function walkTo(target, dt, time) {
-  const toTarget = target.clone().sub(hamster.position);
-  toTarget.y = 0;
-  if (toTarget.length() < 0.05) return true;
-
-  hamster.rotation.y = turnToward(hamster.rotation.y, Math.atan2(toTarget.x, toTarget.z), 0.1);
-  toTarget.normalize();
-  hamster.position.x += toTarget.x * brain.speed * dt;
-  hamster.position.z += toTarget.z * brain.speed * dt;
-  hamster.position.y = GROUND_Y + Math.abs(Math.sin(time * 14)) * 0.03;
-  hamster.rotation.z = Math.sin(time * 14) * 0.08;
-  hamster.rotation.x = 0;
-  hamster.scale.y = SIZE;
+// Walk toward a point (plays the walk animation). Returns true on arrival.
+function walkTo(target, dt) {
+  const dx = target.x - hamster.position.x;
+  const dz = target.z - hamster.position.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 0.05) return true;
+  playAnim('walk', 1.3);
+  faceDirection(dx, dz, 0.12);
+  hamster.position.x += (dx / dist) * brain.speed * dt;
+  hamster.position.z += (dz / dist) * brain.speed * dt;
+  hamster.position.y = GROUND_Y;
   return false;
+}
+
+function resetPose() {
+  hamster.rotation.x = 0;
+  hamster.rotation.z = 0;
+  hamster.scale.set(1, 1, 1);
 }
 
 function updateHamster(dt, time) {
   if (!hamster) return;
 
-  // Hunger always goes down slowly
-  brain.hunger = Math.max(0, brain.hunger - HUNGER_DRAIN * dt);
+  // Needs go down over time (running makes it hungry and thirsty faster)
+  const busy = brain.mood === 'run' ? 2 : 1;
+  brain.hunger = Math.max(0, brain.hunger - DRAIN.hunger * busy * dt);
+  brain.thirst = Math.max(0, brain.thirst - DRAIN.thirst * busy * dt);
+  if (brain.mood !== 'run') brain.fun = Math.max(0, brain.fun - DRAIN.fun * dt);
 
-  // ---- REST ----
-  if (brain.mood === 'rest') {
-    hamster.scale.y = SIZE * (1 + Math.sin(time * 3) * 0.03);
-    hamster.position.y = GROUND_Y;
-    hamster.rotation.z = 0;
-    hamster.rotation.x = 0;
-    brain.timer -= dt;
-    if (brain.timer <= 0) {
-      if (isHungry() && foodCount > 0) {
-        brain.mood = 'goEat';
-      } else {
-        pickRandomSpot();
-        brain.mood = 'walk';
-      }
-    }
-  }
+  switch (brain.mood) {
 
-  // ---- WALK (wander) ----
-  else if (brain.mood === 'walk') {
-    if (isHungry() && foodCount > 0) {          // tummy rumbles → go to food
-      brain.mood = 'goEat';
-      return;
-    }
-    if (walkTo(brain.target, dt, time)) {
-      startResting(THREE.MathUtils.randFloat(1, 4));
-    }
-  }
-
-  // ---- GO EAT (walk to the bowl) ----
-  else if (brain.mood === 'goEat') {
-    if (foodCount === 0) {                      // food gone while walking
-      startResting(2);
-      return;
-    }
-    if (walkTo(EAT_SPOT, dt, time)) {
-      brain.mood = 'eat';
-      brain.timer = 1;                          // 1 second per bite
-    }
-  }
-
-  // ---- EAT (nod and munch) ----
-  else if (brain.mood === 'eat') {
-    // Face the bowl
-    const toBowl = BOWL_POS.clone().sub(hamster.position);
-    hamster.rotation.y = turnToward(hamster.rotation.y, Math.atan2(toBowl.x, toBowl.z), 0.15);
-    // Nod head down and up (munch munch)
-    hamster.rotation.x = Math.abs(Math.sin(time * 10)) * 0.2;
-    hamster.rotation.z = 0;
-    hamster.position.y = GROUND_Y;
-
-    brain.timer -= dt;
-    if (brain.timer <= 0) {
-      if (foodCount > 0) {
-        foodCount--;                            // eat one pellet
-        showPellets();
-        brain.hunger = Math.min(100, brain.hunger + 20);
-      }
-      brain.timer = 1;
-      if (brain.hunger >= 100 || foodCount === 0) {
-        startResting(2);                        // full (or bowl empty)
-      }
-    }
-  }
-
-  // ---- HELD ----
-  else if (brain.mood === 'held') {
-    hamster.position.lerp(dragPoint, 0.25);
-    hamster.rotation.z = Math.sin(time * 30) * 0.15;
-    hamster.rotation.x = -0.2;
-    hamster.scale.y = SIZE * 1.08;
-  }
-
-  // ---- FALL ----
-  else if (brain.mood === 'fall') {
-    brain.fallSpeed -= 9.8 * dt;
-    hamster.position.y += brain.fallSpeed * dt;
-    hamster.rotation.z *= 0.9;
-    hamster.rotation.x *= 0.9;
-    if (hamster.position.y <= GROUND_Y) {
+    case 'rest':
+      playAnim('idle');
+      resetPose();
       hamster.position.y = GROUND_Y;
-      if (brain.fallSpeed < -1) {
-        brain.fallSpeed = -brain.fallSpeed * 0.3;
-        hamster.scale.y = SIZE * 0.8;
-      } else {
+      brain.timer -= dt;
+      if (brain.timer <= 0) brain.mood = decideWhatToDo();
+      break;
+
+    case 'walk':
+      if (isThirsty() || isHungry() || isBored()) { brain.mood = decideWhatToDo(); break; }
+      if (walkTo(brain.target, dt)) startResting(THREE.MathUtils.randFloat(1, 4));
+      break;
+
+    case 'goEat':
+      if (foodCount === 0) { startResting(2); break; }
+      if (walkTo(EAT_SPOT, dt)) { brain.mood = 'eat'; brain.timer = 1; }
+      break;
+
+    case 'eat':
+      playAnim('eat');
+      faceDirection(BOWL_POS.x - hamster.position.x, BOWL_POS.z - hamster.position.z);
+      brain.timer -= dt;
+      if (brain.timer <= 0) {
+        brain.timer = 1;
+        if (foodCount > 0) { foodCount--; brain.hunger = Math.min(100, brain.hunger + 20); }
+        if (brain.hunger >= 100 || foodCount === 0) startResting(2);
+      }
+      break;
+
+    case 'goDrink':
+      if (water <= 0.01) { startResting(2); break; }
+      if (walkTo(DRINK_SPOT, dt)) { brain.mood = 'drink'; brain.timer = 1; }
+      break;
+
+    case 'drink':
+      playAnim('eat', 0.6);                 // reuse the eat animation, slower = sipping
+      faceDirection(1, 0);                  // face the bottle (+X)
+      brain.timer -= dt;
+      if (brain.timer <= 0) {
+        brain.timer = 1;
+        water = Math.max(0, water - 0.1);
+        brain.thirst = Math.min(100, brain.thirst + 15);
+        if (brain.thirst >= 100 || water <= 0.01) startResting(2);
+      }
+      break;
+
+    case 'goWheel':
+      if (isThirsty() || isHungry()) { brain.mood = decideWhatToDo(); break; }
+      if (walkTo(WHEEL_ENTRY, dt)) {
+        hamster.position.copy(IN_WHEEL_POS);   // hop in
+        hamster.rotation.set(0, 0, 0);         // face along the wheel (+Z)
+        brain.mood = 'run';
+        brain.timer = THREE.MathUtils.randFloat(5, 8);
+      }
+      break;
+
+    case 'run':
+      playAnim('walk', 3);                     // walk animation, 3× faster = running
+      wheelSpeed = THREE.MathUtils.lerp(wheelSpeed, 9, 0.05);
+      brain.fun = Math.min(100, brain.fun + 15 * dt);
+      brain.timer -= dt;
+      if (brain.timer <= 0 || brain.fun >= 100 || isThirsty() || isHungry()) {
+        hamster.position.copy(WHEEL_ENTRY);    // hop out
         startResting(1.5);
       }
-    }
+      break;
+
+    case 'held':
+      playAnim('walk', 4);                     // legs paddle in the air
+      hamster.position.lerp(dragPoint, 0.25);
+      hamster.rotation.z = Math.sin(time * 30) * 0.12;
+      hamster.rotation.x = -0.2;
+      break;
+
+    case 'fall':
+      brain.fallSpeed -= 9.8 * dt;
+      hamster.position.y += brain.fallSpeed * dt;
+      hamster.rotation.z *= 0.9;
+      hamster.rotation.x *= 0.9;
+      if (hamster.position.y <= GROUND_Y) {
+        hamster.position.y = GROUND_Y;
+        if (brain.fallSpeed < -1) {
+          brain.fallSpeed = -brain.fallSpeed * 0.3;   // bounce
+          hamster.scale.set(1.1, 0.8, 1.1);           // squash
+        } else {
+          startResting(1.5);
+        }
+      } else {
+        hamster.scale.lerp(new THREE.Vector3(1, 1, 1), 0.2);
+      }
+      break;
   }
 }
 
-// ============ 9. UI (hunger bar + button) ============
-const ui = document.createElement('div');
-ui.style.cssText = `
-  position: fixed; top: 16px; left: 16px; padding: 14px 16px;
-  background: white; border-radius: 14px; font-family: sans-serif;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.12); width: 220px; user-select: none;
-`;
-ui.innerHTML = `
-  <div style="font-weight:bold; margin-bottom:6px;">🐹 Hammy <span id="moodIcon"></span></div>
-  <div style="font-size:13px; margin-bottom:4px;">Hunger</div>
-  <div style="background:#eee; border-radius:8px; height:14px; overflow:hidden;">
-    <div id="hungerFill" style="height:100%; width:100%; background:#6cc070;"></div>
-  </div>
-  <div id="foodText" style="font-size:13px; margin:8px 0;">Food in bowl: 5</div>
-  <button id="feedBtn" style="width:100%; padding:8px; border:none; border-radius:8px;
-          background:#f4a261; color:white; font-weight:bold; cursor:pointer;">
-    🥣 Refill food
-  </button>
-`;
-document.body.appendChild(ui);
-
-const hungerFill = document.getElementById('hungerFill');
-const foodText = document.getElementById('foodText');
-const moodIcon = document.getElementById('moodIcon');
-document.getElementById('feedBtn').addEventListener('click', refillFood);
-
-const MOOD_ICONS = { rest: '😌', walk: '🐾', goEat: '🤤', eat: '😋', held: '😲', fall: '😵' };
-
-function updateUI() {
-  const h = brain.hunger;
-  hungerFill.style.width = h + '%';
-  hungerFill.style.background = h > 60 ? '#6cc070' : h > 30 ? '#f2b84b' : '#e5604f';
-  foodText.textContent = 'Food in bowl: ' + foodCount;
-  moodIcon.textContent = (isHungry() && foodCount === 0 && brain.mood === 'rest')
-    ? '😢' : MOOD_ICONS[brain.mood];
+// ============ 7. WHEEL ============
+let wheelSpeed = 0;
+function updateWheel(dt) {
+  if (!wheelSpin) return;
+  if (brain.mood !== 'run') wheelSpeed *= Math.pow(0.4, dt);   // coast to a stop
+  wheelSpin.rotation.x += wheelSpeed * dt;
 }
 
-// ============ 10. MOUSE: PICK UP & DROP ============
+// ============ 8. UI ============
+const ui = document.createElement('div');
+ui.style.cssText = `position:fixed; top:16px; left:16px; padding:14px 16px; width:220px;
+  background:white; border-radius:14px; font-family:sans-serif; user-select:none;
+  box-shadow:0 4px 14px rgba(0,0,0,0.12);`;
+const bar = (label, id) => `
+  <div style="font-size:13px; margin-bottom:3px;">${label}</div>
+  <div style="background:#eee; border-radius:8px; height:14px; overflow:hidden; margin-bottom:8px;">
+    <div id="${id}" style="height:100%; width:100%;"></div>
+  </div>`;
+const button = (id, text, color) => `
+  <button id="${id}" style="width:100%; padding:8px; margin-top:6px; border:none; border-radius:8px;
+    background:${color}; color:white; font-weight:bold; cursor:pointer;">${text}</button>`;
+ui.innerHTML = `
+  <div style="font-weight:bold; margin-bottom:8px;">🐹 Hammy <span id="moodIcon"></span></div>
+  ${bar('🍽️ Hunger', 'hungerFill')}
+  ${bar('💧 Thirst', 'thirstFill')}
+  ${bar('🎉 Fun', 'funFill')}
+  <div id="stockText" style="font-size:12px; color:#666;"></div>
+  ${button('feedBtn', '🥣 Refill food', '#f4a261')}
+  ${button('waterBtn', '💧 Fill water', '#4ea8de')}
+`;
+document.body.appendChild(ui);
+document.getElementById('feedBtn').onclick = refillFood;
+document.getElementById('waterBtn').onclick = fillWater;
+
+const MOOD_ICONS = { rest: '😌', walk: '🐾', goEat: '🤤', eat: '😋', goDrink: '🥤', drink: '💧',
+                     goWheel: '🤩', run: '🏃', held: '😲', fall: '😵' };
+const colorFor = (v) => v > 60 ? '#6cc070' : v > 30 ? '#f2b84b' : '#e5604f';
+
+function setBar(id, value) {
+  const el = document.getElementById(id);
+  el.style.width = value + '%';
+  el.style.background = colorFor(value);
+}
+
+function updateUI() {
+  setBar('hungerFill', brain.hunger);
+  setBar('thirstFill', brain.thirst);
+  setBar('funFill', brain.fun);
+  document.getElementById('stockText').textContent =
+    `Food: ${foodCount}/5   •   Water: ${Math.round(water * 100)}%`;
+  const sad = brain.mood === 'rest' &&
+    ((brain.hunger < LOW && foodCount === 0) || (brain.thirst < LOW && water <= 0.01));
+  document.getElementById('moodIcon').textContent = sad ? '😢' : MOOD_ICONS[brain.mood];
+}
+
+// ============ 9. MOUSE: PICK UP & DROP ============
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
-const HOLD_HEIGHT = 0.9;
+const HOLD_HEIGHT = 1.0;
 const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -HOLD_HEIGHT);
 const dragPoint = new THREE.Vector3();
 const canvas = renderer.domElement;
 
-function updateMouse(event) {
-  mouse.x = (event.clientX / innerWidth) * 2 - 1;
-  mouse.y = -(event.clientY / innerHeight) * 2 + 1;
+function updateMouse(e) {
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
   raycaster.setFromCamera(mouse, camera);
 }
-
-function isMouseOverHamster() {
-  return hamster && raycaster.intersectObject(hamster, true).length > 0;
-}
+const isMouseOverHamster = () => hamster && raycaster.intersectObject(hamster, true).length > 0;
 
 function updateDragPoint() {
   raycaster.ray.intersectPlane(dragPlane, dragPoint);
-  const m = 0.3;
+  const m = 0.35;
   dragPoint.x = THREE.MathUtils.clamp(dragPoint.x, -CAGE_W / 2 + m, CAGE_W / 2 - m);
   dragPoint.z = THREE.MathUtils.clamp(dragPoint.z, -CAGE_D / 2 + m, CAGE_D / 2 - m);
   dragPoint.y = HOLD_HEIGHT;
 }
 
-canvas.addEventListener('pointerdown', (event) => {
-  updateMouse(event);
+canvas.addEventListener('pointerdown', (e) => {
+  updateMouse(e);
   if (isMouseOverHamster()) {
     brain.mood = 'held';
     controls.enabled = false;
@@ -335,13 +397,11 @@ canvas.addEventListener('pointerdown', (event) => {
     updateDragPoint();
   }
 });
-
-canvas.addEventListener('pointermove', (event) => {
-  updateMouse(event);
+canvas.addEventListener('pointermove', (e) => {
+  updateMouse(e);
   if (brain.mood === 'held') updateDragPoint();
   else canvas.style.cursor = isMouseOverHamster() ? 'grab' : 'default';
 });
-
 addEventListener('pointerup', () => {
   if (brain.mood === 'held') {
     brain.mood = 'fall';
@@ -351,17 +411,21 @@ addEventListener('pointerup', () => {
   }
 });
 
-// ============ 11. CAMERA CONTROLS ============
+// ============ 10. CAMERA CONTROLS ============
 const controls = new OrbitControls(camera, canvas);
-controls.target.set(0, 0.2, 0);
+controls.target.set(0, 0.3, 0);
 controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI / 2.1;   // don't let the camera go under the floor
 
-// ============ 12. GAME LOOP ============
+// ============ 11. GAME LOOP ============
 const clock = new THREE.Clock();
 function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
   const time = clock.elapsedTime;
   updateHamster(dt, time);
+  if (mixer) mixer.update(dt);    // advance the hamster's animations
+  updateWheel(dt);
+  updateFoodAndWater();
   updateUI();
   controls.update();
   renderer.render(scene, camera);
